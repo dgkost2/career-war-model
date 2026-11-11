@@ -37,5 +37,12 @@ Two numbers per player:
 - Scripts should be re-runnable from scratch without manual steps.
 - Validate against held-out cohorts before trusting any projection.
 
+## Data decisions
+- Stats are stored as stints: one row per player × season × team × level. Traded/promoted players have multiple stints. Drop any combined/total rows to avoid double counting.
+- Org membership comes from a teams-by-season table (team → level, league, parentOrgId), since affiliations change year to year.
+- Transactions are used for events only (rehab assignments, signings, releases, trades, IL, promotions), not to build stat stints. MLB players' MiLB rehab stints must be flagged.
+- Hitter vs pitcher is decided per player-season from PA and batters faced, not primaryPosition. Two-way players go through both models later.
+- currentAge and currentTeam are as-of-today fields; never use them for season data. Season age comes from birthDate.
+
 ## Build order (phases)
 0 Setup → 1 Data pull → 2 Clean & build tables → 3 MiLB→MLB translations → 4 Talent estimate (weighting + regression) → 5 Aging curves → 6 Playing time & attrition → 7 WAR calc → 8 Reach-MLB model & expected WAR → 9 Validation → 10 Pitchers → 11 Storage (Supabase) & site (Next.js/Vercel) → 12 Scout grades, contracts, prospect ranks.
