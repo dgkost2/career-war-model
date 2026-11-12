@@ -33,14 +33,15 @@ data/processed/reconcile_log.csv, rewritten on every run.
 
 Output: data/processed/hitting_season.parquet, rebuilt from every cached roster
 file. Columns: playerId, season, teamId, sportId, leagueId, G, PA, AB, H, 2B,
-3B, HR, BB, IBB, HBP, SO, SB, CS, SF, source ("roster" or "bulk").
+3B, HR, BB, IBB, HBP, SO, SB, CS, SF, source ("roster" or "bulk"), level
+(sportId abbreviation, overridden by leagueId for MEX / DSL / VSL).
 """
 import argparse
 import json
 
 import pandas as pd
 
-from mlb_api import PROCESSED_DIR, RAW_DIR, fetch_cached, is_skipped, levels_for, parse_seasons
+from mlb_api import PROCESSED_DIR, RAW_DIR, fetch_cached, is_skipped, level_code, levels_for, parse_seasons
 
 BULK_RAW = RAW_DIR / "hitting"
 ROSTER_RAW = RAW_DIR / "hitting_roster"
@@ -156,6 +157,7 @@ def build_table() -> pd.DataFrame:
     df = add_bulk_fallback(df.drop_duplicates())
     if df.duplicated(KEY).any():
         raise RuntimeError(f"conflicting copies of a stint:\n{df[df.duplicated(KEY, keep=False)]}")
+    df["level"] = level_code(df)
     return df.sort_values(KEY).reset_index(drop=True)
 
 

@@ -3,6 +3,7 @@ import json
 import time
 from pathlib import Path
 
+import pandas as pd
 import requests
 
 BASE_URL = "https://statsapi.mlb.com/api/v1"
@@ -12,23 +13,42 @@ RAW_DIR = ROOT / "data" / "raw"
 PROCESSED_DIR = ROOT / "data" / "processed"
 
 # sportIds in scope for v1, highest level first.
-LEVEL_IDS = [1, 11, 12, 13, 14, 16]
+# 15 = Short-Season A (NYPL, Northwest League), eliminated in the 2021 reorganization.
+LEVEL_IDS = [1, 11, 12, 13, 14, 15, 16]
 
-# Season -> levels that didn't play. No MiLB season in 2020 (COVID); the API
-# still lists 2020 MiLB teams, so these must be skipped explicitly.
-SKIPPED_LEVELS = {2020: {11, 12, 13, 14, 16}}
+# The API still lists teams for seasons that weren't played, so skip explicitly.
+NO_MILB_SEASONS = {2020}           # COVID: no MiLB season
+LEVEL_LAST_SEASON = {15: 2019}     # sportId -> last season played
 
 
 def is_skipped(season: int, sport_id: int) -> bool:
-    return sport_id in SKIPPED_LEVELS.get(season, set())
+    if sport_id != 1 and season in NO_MILB_SEASONS:
+        return True
+    return season > LEVEL_LAST_SEASON.get(sport_id, season)
 
 
 def levels_for(season: int) -> list[int]:
     """In-scope sportIds that played in this season. Prints a note for skipped ones."""
     skipped = [s for s in LEVEL_IDS if is_skipped(season, s)]
     if skipped:
-        print(f"{season}: skipping sportIds {skipped} (no season played)")
+        print(f"{season}: skipping sportIds {skipped} (not played this season)")
     return [s for s in LEVEL_IDS if s not in skipped]
+
+
+# leagueId -> level code that overrides the sportId abbreviation. These leagues
+# sit inside a sportId but are treated as their own level downstream:
+#   125 Mexican League (in AAA through 2019; not MLB-affiliated) -> never part of AAA
+#   130 Dominican Summer League, 134 Venezuelan Summer League (in Rookie)
+LEAGUE_LEVEL = {125: "MEX", 130: "DSL", 134: "VSL"}
+
+
+def level_code(df: pd.DataFrame) -> pd.Series:
+    """Level code per row from sportId and leagueId columns (needs levels.parquet)."""
+    abbr = pd.read_parquet(PROCESSED_DIR / "levels.parquet").set_index("sportId")["abbreviation"]
+    missing = set(df["sportId"]) - set(abbr.index)
+    if missing:
+        raise RuntimeError(f"sportIds {sorted(missing)} not in levels.parquet; re-run pull_levels.py")
+    return df["leagueId"].map(LEAGUE_LEVEL).fillna(df["sportId"].map(abbr)).astype("string")
 
 
 SLEEP_SECONDS = 0.5

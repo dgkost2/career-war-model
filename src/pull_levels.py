@@ -1,7 +1,8 @@
 """Step 1.1: pull /sports and build the levels lookup.
 
 Outputs:
-  data/raw/sports.json            raw API response
+  data/raw/sports.json            raw API response (active sports only)
+  data/raw/sports_{id}.json       inactive in-scope levels, e.g. 15 Short-Season A
   data/processed/levels.parquet   sportId, name, abbreviation for in-scope levels
 """
 import pandas as pd
@@ -13,18 +14,21 @@ def main() -> None:
     data, fetched = fetch_cached("/sports", RAW_DIR / "sports.json")
     print(f"sports.json: {'downloaded' if fetched else 'cached'}")
 
-    sports = pd.DataFrame(data["sports"])
+    sports = data["sports"]
+    # /sports lists only active sports; fetch retired in-scope levels (e.g. 15) by id.
+    for sport_id in sorted(set(LEVEL_IDS) - {s["id"] for s in sports}):
+        extra, fetched = fetch_cached(f"/sports/{sport_id}", RAW_DIR / f"sports_{sport_id}.json")
+        print(f"sports_{sport_id}.json: {'downloaded' if fetched else 'cached'} (inactive level)")
+        sports += extra["sports"]
+
+    sports = pd.DataFrame(sports)
     levels = (
         sports.loc[sports["id"].isin(LEVEL_IDS), ["id", "name", "abbreviation"]]
         .rename(columns={"id": "sportId"})
         .set_index("sportId")
-        .loc[LEVEL_IDS]  # keep MLB -> Rookie order
+        .loc[LEVEL_IDS]  # keep MLB -> Rookie order; raises KeyError if a level is missing
         .reset_index()
     )
-
-    missing = set(LEVEL_IDS) - set(levels["sportId"])
-    if missing:
-        raise RuntimeError(f"sportIds missing from /sports response: {sorted(missing)}")
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     out = PROCESSED_DIR / "levels.parquet"
