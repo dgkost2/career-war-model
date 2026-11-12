@@ -14,6 +14,23 @@ PROCESSED_DIR = ROOT / "data" / "processed"
 # sportIds in scope for v1, highest level first.
 LEVEL_IDS = [1, 11, 12, 13, 14, 16]
 
+# Season -> levels that didn't play. No MiLB season in 2020 (COVID); the API
+# still lists 2020 MiLB teams, so these must be skipped explicitly.
+SKIPPED_LEVELS = {2020: {11, 12, 13, 14, 16}}
+
+
+def is_skipped(season: int, sport_id: int) -> bool:
+    return sport_id in SKIPPED_LEVELS.get(season, set())
+
+
+def levels_for(season: int) -> list[int]:
+    """In-scope sportIds that played in this season. Prints a note for skipped ones."""
+    skipped = [s for s in LEVEL_IDS if is_skipped(season, s)]
+    if skipped:
+        print(f"{season}: skipping sportIds {skipped} (no season played)")
+    return [s for s in LEVEL_IDS if s not in skipped]
+
+
 SLEEP_SECONDS = 0.5
 
 _session = requests.Session()

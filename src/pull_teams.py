@@ -13,14 +13,14 @@ import json
 
 import pandas as pd
 
-from mlb_api import LEVEL_IDS, PROCESSED_DIR, RAW_DIR, fetch_cached, parse_seasons
+from mlb_api import PROCESSED_DIR, RAW_DIR, fetch_cached, is_skipped, levels_for, parse_seasons
 
 TEAMS_RAW = RAW_DIR / "teams"
 
 
 def pull(seasons: list[int]) -> None:
     for season in seasons:
-        for sport_id in LEVEL_IDS:
+        for sport_id in levels_for(season):
             data, fetched = fetch_cached(
                 "/teams",
                 TEAMS_RAW / f"{season}_{sport_id}.json",
@@ -34,6 +34,8 @@ def build_table() -> pd.DataFrame:
     rows = []
     for f in sorted(TEAMS_RAW.glob("*_*.json")):
         season, sport_id = (int(x) for x in f.stem.split("_"))
+        if is_skipped(season, sport_id):
+            continue
         for t in json.loads(f.read_text(encoding="utf-8"))["teams"]:
             rows.append({
                 "season": season,

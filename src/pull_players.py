@@ -10,7 +10,7 @@ files that already exist.
 """
 import argparse
 
-from mlb_api import LEVEL_IDS, RAW_DIR, fetch_cached, parse_seasons
+from mlb_api import RAW_DIR, fetch_cached, levels_for, parse_seasons
 
 
 def main() -> None:
@@ -19,7 +19,7 @@ def main() -> None:
     args = parser.parse_args()
 
     for season in parse_seasons(args.seasons):
-        for sport_id in LEVEL_IDS:
+        for sport_id in levels_for(season):
             cache_file = RAW_DIR / "players" / f"{season}_{sport_id}.json"
             data, fetched = fetch_cached(
                 f"/sports/{sport_id}/players", cache_file, params={"season": season}

@@ -40,7 +40,7 @@ import json
 
 import pandas as pd
 
-from mlb_api import LEVEL_IDS, PROCESSED_DIR, RAW_DIR, fetch_cached, parse_seasons
+from mlb_api import PROCESSED_DIR, RAW_DIR, fetch_cached, is_skipped, levels_for, parse_seasons
 
 BULK_RAW = RAW_DIR / "hitting"
 ROSTER_RAW = RAW_DIR / "hitting_roster"
@@ -90,7 +90,7 @@ def pull(seasons: list[int]) -> None:
         season_teams = teams[teams.season == season]
         if season_teams.empty:
             raise RuntimeError(f"no teams for {season} in teams_season.parquet; run pull_teams.py {season}")
-        for sport_id in LEVEL_IDS:
+        for sport_id in levels_for(season):
             b_rows, b_calls = pull_bulk(season, sport_id)
             level_teams = season_teams[season_teams.sportId == sport_id].teamId
             r_calls = sum(pull_roster(season, sport_id, t) for t in level_teams)
@@ -111,7 +111,7 @@ def read_bulk(seasons: set[int]) -> list[tuple[int, int, dict]]:
     out = []
     for f in sorted(BULK_RAW.glob("*.json")):
         season, sport_id, _ = (int(x) for x in f.stem.split("_"))
-        if season in seasons:
+        if season in seasons and not is_skipped(season, sport_id):
             out += [(season, sport_id, sp) for sp in json.loads(f.read_text(encoding="utf-8"))["stats"][0]["splits"]]
     return out
 
@@ -138,6 +138,8 @@ def build_table() -> pd.DataFrame:
     rows = []
     for f in sorted(ROSTER_RAW.glob("*.json")):
         season, sport_id, _ = (int(x) for x in f.stem.split("_"))
+        if is_skipped(season, sport_id):
+            continue
         for entry in json.loads(f.read_text(encoding="utf-8")).get("roster", []):
             for st in entry["person"].get("stats", []):
                 for sp in st["splits"]:
