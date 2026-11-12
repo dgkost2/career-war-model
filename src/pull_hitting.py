@@ -23,7 +23,13 @@ Two pulls, both cached and skipped if present:
 
 A few players aren't on any fullSeason roster (e.g. Royce Lewis, 2025 MIN).
 If such a player-level has a single-team bulk row, that row is used as the
-stint (source="bulk"); a multi-team one raises an error.
+stint (source="bulk"); a multi-team one can't be split and is left out.
+
+Reconciliation: every player-level whose stint PA doesn't equal the bulk PA
+(including ones with no stints at all) is written to
+data/processed/reconcile_log.csv, rewritten on every run.
+  - single-season run: any mismatch in that season stops the script.
+  - multi-season run: mismatches are logged and the run continues.
 
 Output: data/processed/hitting_season.parquet, rebuilt from every cached roster
 file. Columns: playerId, season, teamId, sportId, leagueId, G, PA, AB, H, 2B,
@@ -122,8 +128,8 @@ def add_bulk_fallback(df: pd.DataFrame) -> pd.DataFrame:
             extra.append(stint_row(sp, season, sport_id, "bulk"))
         else:
             unfixable.append((season, sport_id, sp["player"]["id"], sp["player"]["fullName"]))
-    if unfixable:
-        raise RuntimeError(f"multi-team players missing from all rosters: {unfixable}")
+    if unfixable:  # left out here; check_against_bulk logs them (or stops)
+        print(f"warning: {len(unfixable)} multi-team player-levels missing from all rosters: {unfixable[:10]}")
     print(f"bulk fallback: added {len(extra)} single-team stints missing from rosters")
     return pd.concat([df, pd.DataFrame(extra)], ignore_index=True)
 
@@ -151,8 +157,12 @@ def build_table() -> pd.DataFrame:
     return df.sort_values(KEY).reset_index(drop=True)
 
 
-def check_against_bulk(df: pd.DataFrame) -> None:
-    """Stint PA must sum to the bulk PA for every player × season × level."""
+def check_against_bulk(df: pd.DataFrame, strict_season: int | None) -> None:
+    """Stint PA must sum to the bulk PA for every player × season × level.
+
+    Mismatches always go to reconcile_log.csv. If strict_season is set
+    (single-season run), any mismatch in that season raises.
+    """
     bulk = pd.DataFrame(
         {"season": season, "sportId": sport_id, "playerId": sp["player"]["id"],
          "PA_bulk": sp["stat"]["plateAppearances"]}
@@ -161,9 +171,18 @@ def check_against_bulk(df: pd.DataFrame) -> None:
     stints = df.groupby(["season", "sportId", "playerId"], as_index=False).PA.sum()
     m = bulk.merge(stints, on=["season", "sportId", "playerId"], how="outer", indicator=True)
     bad = m[(m._merge != "both") | (m.PA_bulk != m.PA)]
-    print(f"bulk check: {len(m)} player-levels, {len(bad)} mismatches")
-    if len(bad):
-        raise RuntimeError(f"stints don't match bulk totals:\n{bad.to_string(index=False)}")
+    log = (bad.rename(columns={"PA": "stint_PA", "PA_bulk": "bulk_PA"})
+              [["season", "sportId", "playerId", "stint_PA", "bulk_PA"]]
+              .astype({"stint_PA": "Int64", "bulk_PA": "Int64"})
+              .sort_values(["season", "sportId", "playerId"]))
+    log_path = PROCESSED_DIR / "reconcile_log.csv"
+    log.to_csv(log_path, index=False)  # written even when empty, so a stale log never lingers
+    print(f"bulk check: {len(m)} player-levels, {len(log)} mismatches -> {log_path}")
+    if len(log):
+        print(log.groupby("season").size().rename("mismatches").to_string())
+    if strict_season is not None and (log.season == strict_season).any():
+        bad_season = log[log.season == strict_season]
+        raise RuntimeError(f"stints don't match bulk totals for {strict_season}:\n{bad_season.to_string(index=False)}")
 
 
 def main() -> None:
@@ -171,10 +190,11 @@ def main() -> None:
     parser.add_argument("seasons", nargs="+", help="season(s), e.g. 2025, or a range like 2005-2025")
     args = parser.parse_args()
 
-    pull(parse_seasons(args.seasons))
+    seasons = parse_seasons(args.seasons)
+    pull(seasons)
 
     df = build_table()
-    check_against_bulk(df)
+    check_against_bulk(df, strict_season=seasons[0] if len(seasons) == 1 else None)
     out = PROCESSED_DIR / "hitting_season.parquet"
     df.to_parquet(out, index=False)
     print(f"wrote {out} ({len(df)} rows)")
