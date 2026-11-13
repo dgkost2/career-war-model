@@ -32,6 +32,12 @@ Usage:
      all_rehab  stint G <= rehab days at that team and no non-rehab move into
                 that team that season -> the whole stint is rehab
      mixed      otherwise -> needs game logs to split into rehab / non-rehab rows
+   rehab_source = "transactions" for these.
+
+5. 2005-2008 have no transactions, so rehab_stints also gets heuristic rows
+   (status "likely_rehab", rehab_source "heuristic"): a MiLB stint of <= 10 G,
+   in a season he has MLB PA, at an affiliate of (one of) his MLB teams. The
+   heuristic is scored against real rehab stints in 2009-2012 on every run.
 """
 import argparse
 import calendar
@@ -179,6 +185,46 @@ def classify_stints(windows: pd.DataFrame, tx: pd.DataFrame) -> pd.DataFrame:
     return m[cols].sort_values(key).reset_index(drop=True)
 
 
+HEURISTIC_SEASONS = range(2005, 2009)   # no transactions in the API before 2009
+HEURISTIC_MAX_G = 10
+VALIDATION_SEASONS = range(2009, 2013)  # real rehab windows exist; used to score the heuristic
+
+
+def heuristic_rehab(seasons) -> pd.DataFrame:
+    """MiLB hitting stints that are likely MLB rehab assignments, without transactions:
+    same season he has MLB PA, the MiLB team belongs to (one of) his MLB team's org,
+    and the stint is short (G <= HEURISTIC_MAX_G)."""
+    hitting = pd.read_parquet(PROCESSED_DIR / "hitting_season.parquet")
+    teams = pd.read_parquet(PROCESSED_DIR / "teams_season.parquet")[["season", "teamId", "parentOrgId"]]
+    h = hitting[hitting.season.isin(seasons)]
+    mlb_orgs = (h[(h.sportId == 1) & (h.PA > 0)][["playerId", "season", "teamId"]]
+                .rename(columns={"teamId": "parentOrgId"}).drop_duplicates())
+    milb = h[(h.sportId != 1) & (h.level != "MEX") & (h.G <= HEURISTIC_MAX_G)].merge(teams, on=["season", "teamId"])
+    flagged = milb.merge(mlb_orgs, on=["playerId", "season", "parentOrgId"])
+    return flagged[["playerId", "season", "teamId", "sportId", "level", "G", "PA"]].drop_duplicates()
+
+
+def validate_heuristic(stints: pd.DataFrame) -> None:
+    """Score the heuristic against transaction-based rehab stints in VALIDATION_SEASONS."""
+    key = ["playerId", "season", "teamId"]
+    real = stints[stints.season.isin(VALIDATION_SEASONS) & (stints.level != "MLB")]
+    flags = heuristic_rehab(VALIDATION_SEASONS)
+    hit = flags.merge(real[key + ["status", "origin_levels"]], on=key, how="left")
+    precision = hit.status.notna().mean()
+    rec = real.merge(flags[key].assign(flagged=True), on=key, how="left").fillna({"flagged": False})
+    mlb_origin = rec.origin_levels.str.contains("MLB")
+    print(f"heuristic validation {VALIDATION_SEASONS.start}-{VALIDATION_SEASONS.stop - 1}: "
+          f"{len(flags)} flags, precision {precision:.1%}, recall {rec.flagged.mean():.1%} of all "
+          f"{len(rec)} real rehab stints, {rec[mlb_origin].flagged.mean():.1%} of {mlb_origin.sum()} MLB-origin")
+
+
+def add_heuristic(stints: pd.DataFrame) -> pd.DataFrame:
+    h = heuristic_rehab(HEURISTIC_SEASONS).assign(status="likely_rehab", rehab_source="heuristic")
+    print(f"heuristic rehab flags {HEURISTIC_SEASONS.start}-{HEURISTIC_SEASONS.stop - 1}: "
+          f"{h.groupby('season').size().to_dict()}")
+    return pd.concat([stints.assign(rehab_source="transactions"), h], ignore_index=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("years", nargs="+", help="year(s), e.g. 2025 or 2005-2026")
@@ -193,9 +239,11 @@ def main() -> None:
     print(f"rehab windows: {len(windows)}")
 
     stints = classify_stints(windows, tx)
-    stints.to_parquet(PROCESSED_DIR / "rehab_stints.parquet", index=False)
     print(f"hitting stints at a rehab team: {len(stints)} "
           f"({(stints.status == 'all_rehab').sum()} all_rehab, {(stints.status == 'mixed').sum()} mixed)")
+    validate_heuristic(stints)
+    stints = add_heuristic(stints)
+    stints.to_parquet(PROCESSED_DIR / "rehab_stints.parquet", index=False)
 
 
 if __name__ == "__main__":
