@@ -41,10 +41,10 @@ import json
 
 import pandas as pd
 
-from mlb_api import PROCESSED_DIR, RAW_DIR, fetch_cached, is_skipped, level_code, levels_for, parse_seasons
+from mlb_api import PROCESSED_DIR, RAW_DIR, fetch_cached, is_skipped, level_code, parse_seasons
+from rosters import iter_stint_splits, pull_rosters
 
 BULK_RAW = RAW_DIR / "hitting"
-ROSTER_RAW = RAW_DIR / "hitting_roster"
 PAGE_SIZE = 500
 
 # output column -> API stat field
@@ -75,28 +75,12 @@ def pull_bulk(season: int, sport_id: int) -> tuple[int, int]:
         offset += PAGE_SIZE
 
 
-def pull_roster(season: int, sport_id: int, team_id: int) -> bool:
-    _, fetched = fetch_cached(
-        f"/teams/{team_id}/roster",
-        ROSTER_RAW / f"{season}_{sport_id}_{team_id}.json",
-        params={"rosterType": "fullSeason", "season": season,
-                "hydrate": f"person(stats(type=season,season={season},group=hitting,sportId={sport_id}))"},
-    )
-    return fetched
-
-
 def pull(seasons: list[int]) -> None:
-    teams = pd.read_parquet(PROCESSED_DIR / "teams_season.parquet")
     for season in seasons:
-        season_teams = teams[teams.season == season]
-        if season_teams.empty:
-            raise RuntimeError(f"no teams for {season} in teams_season.parquet; run pull_teams.py {season}")
-        for sport_id in levels_for(season):
+        for sport_id, n_teams, r_calls in pull_rosters(season, "hitting"):
             b_rows, b_calls = pull_bulk(season, sport_id)
-            level_teams = season_teams[season_teams.sportId == sport_id].teamId
-            r_calls = sum(pull_roster(season, sport_id, t) for t in level_teams)
             print(f"{season} sportId={sport_id:>2}: bulk {b_rows:>5} rows ({b_calls} calls) | "
-                  f"rosters for {len(level_teams)} teams ({r_calls} calls)")
+                  f"rosters for {n_teams} teams ({r_calls} calls)")
 
 
 def stint_row(sp: dict, season: int, sport_id: int, source: str) -> dict:
@@ -136,22 +120,8 @@ def add_bulk_fallback(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_table() -> pd.DataFrame:
-    rows = []
-    for f in sorted(ROSTER_RAW.glob("*.json")):
-        season, sport_id, _ = (int(x) for x in f.stem.split("_"))
-        if is_skipped(season, sport_id):
-            continue
-        for entry in json.loads(f.read_text(encoding="utf-8")).get("roster", []):
-            for st in entry["person"].get("stats", []):
-                for sp in st["splits"]:
-                    if "team" not in sp or sp.get("numTeams", 1) > 1:
-                        continue  # combined/total row: never a stint
-                    if sp.get("gameType", "R") != "R" or int(sp["season"]) != season:
-                        continue
-                    if sp["sport"]["id"] != sport_id:
-                        raise RuntimeError(f"{f.name}: split at sportId {sp['sport']['id']}")
-                    rows.append(stint_row(sp, season, sport_id, "roster"))
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(stint_row(sp, season, sport_id, "roster")
+                      for season, sport_id, sp in iter_stint_splits("hitting"))
     # A traded player appears on each of his teams' rosters with all his splits,
     # so the same stint shows up more than once. Copies must be identical.
     df = add_bulk_fallback(df.drop_duplicates())
