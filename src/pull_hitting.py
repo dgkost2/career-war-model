@@ -37,15 +37,11 @@ file. Columns: playerId, season, teamId, sportId, leagueId, G, PA, AB, H, 2B,
 (sportId abbreviation, overridden by leagueId for MEX / DSL / VSL).
 """
 import argparse
-import json
 
 import pandas as pd
 
-from mlb_api import PROCESSED_DIR, RAW_DIR, fetch_cached, is_skipped, level_code, parse_seasons
-from rosters import iter_stint_splits, pull_rosters
-
-BULK_RAW = RAW_DIR / "hitting"
-PAGE_SIZE = 500
+from mlb_api import level_code, PROCESSED_DIR, parse_seasons
+from rosters import bulk_fallback, iter_stint_splits, pull_bulk, pull_rosters, read_bulk, write_reconcile_log
 
 # output column -> API stat field
 STAT_FIELDS = {
@@ -57,28 +53,10 @@ STAT_FIELDS = {
 KEY = ["playerId", "season", "teamId", "sportId"]
 
 
-def pull_bulk(season: int, sport_id: int) -> tuple[int, int]:
-    """Page the bulk query by offset. Returns (rows, api_calls)."""
-    offset = rows = calls = 0
-    while True:
-        data, fetched = fetch_cached(
-            "/stats",
-            BULK_RAW / f"{season}_{sport_id}_{offset}.json",
-            params={"stats": "season", "group": "hitting", "playerPool": "ALL", "sportId": sport_id,
-                    "season": season, "limit": PAGE_SIZE, "offset": offset},
-        )
-        calls += fetched
-        splits = data["stats"][0]["splits"] if data.get("stats") else []
-        rows += len(splits)
-        if len(splits) < PAGE_SIZE:
-            return rows, calls
-        offset += PAGE_SIZE
-
-
 def pull(seasons: list[int]) -> None:
     for season in seasons:
         for sport_id, n_teams, r_calls in pull_rosters(season, "hitting"):
-            b_rows, b_calls = pull_bulk(season, sport_id)
+            b_rows, b_calls = pull_bulk(season, sport_id, "hitting")
             print(f"{season} sportId={sport_id:>2}: bulk {b_rows:>5} rows ({b_calls} calls) | "
                   f"rosters for {n_teams} teams ({r_calls} calls)")
 
@@ -92,30 +70,11 @@ def stint_row(sp: dict, season: int, sport_id: int, source: str) -> dict:
     }
 
 
-def read_bulk(seasons: set[int]) -> list[tuple[int, int, dict]]:
-    out = []
-    for f in sorted(BULK_RAW.glob("*.json")):
-        season, sport_id, _ = (int(x) for x in f.stem.split("_"))
-        if season in seasons and not is_skipped(season, sport_id):
-            out += [(season, sport_id, sp) for sp in json.loads(f.read_text(encoding="utf-8"))["stats"][0]["splits"]]
-    return out
-
-
 def add_bulk_fallback(df: pd.DataFrame) -> pd.DataFrame:
-    """Fill player-levels the rosters missed (a few players aren't on any fullSeason
-    roster). A single-team bulk row is already a correct stint; a multi-team one isn't."""
+    """Fill player-levels the rosters missed (a few players aren't on any fullSeason roster)."""
     covered = set(df[["season", "sportId", "playerId"]].itertuples(index=False, name=None))
-    extra, unfixable = [], []
-    for season, sport_id, sp in read_bulk(set(df.season)):
-        if (season, sport_id, sp["player"]["id"]) in covered:
-            continue
-        if sp.get("numTeams", 1) == 1:
-            extra.append(stint_row(sp, season, sport_id, "bulk"))
-        else:
-            unfixable.append((season, sport_id, sp["player"]["id"], sp["player"]["fullName"]))
-    if unfixable:  # left out here; check_against_bulk logs them (or stops)
-        print(f"warning: {len(unfixable)} multi-team player-levels missing from all rosters: {unfixable[:10]}")
-    print(f"bulk fallback: added {len(extra)} single-team stints missing from rosters")
+    extra = [stint_row(sp, season, sport_id, "bulk")
+             for season, sport_id, sp in bulk_fallback(covered, set(df.season), "hitting")]
     return pd.concat([df, pd.DataFrame(extra)], ignore_index=True)
 
 
@@ -140,7 +99,7 @@ def check_against_bulk(df: pd.DataFrame, strict_season: int | None) -> None:
     bulk = pd.DataFrame(
         {"season": season, "sportId": sport_id, "playerId": sp["player"]["id"],
          "PA_bulk": sp["stat"]["plateAppearances"]}
-        for season, sport_id, sp in read_bulk(set(df.season))
+        for season, sport_id, sp in read_bulk(set(df.season), "hitting")
     )
     stints = df.groupby(["season", "sportId", "playerId"], as_index=False).PA.sum()
     m = bulk.merge(stints, on=["season", "sportId", "playerId"], how="outer", indicator=True)
@@ -149,14 +108,8 @@ def check_against_bulk(df: pd.DataFrame, strict_season: int | None) -> None:
               [["season", "sportId", "playerId", "stint_PA", "bulk_PA"]]
               .astype({"stint_PA": "Int64", "bulk_PA": "Int64"})
               .sort_values(["season", "sportId", "playerId"]))
-    log_path = PROCESSED_DIR / "reconcile_log.csv"
-    log.to_csv(log_path, index=False)  # written even when empty, so a stale log never lingers
-    print(f"bulk check: {len(m)} player-levels, {len(log)} mismatches -> {log_path}")
-    if len(log):
-        print(log.groupby("season").size().rename("mismatches").to_string())
-    if strict_season is not None and (log.season == strict_season).any():
-        bad_season = log[log.season == strict_season]
-        raise RuntimeError(f"stints don't match bulk totals for {strict_season}:\n{bad_season.to_string(index=False)}")
+    print(f"hitting check covers {len(m)} player-levels")
+    write_reconcile_log(log, "reconcile_log.csv", strict_season, "hitting PA")
 
 
 def main() -> None:
