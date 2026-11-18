@@ -12,8 +12,12 @@ cached to data/raw/gamelogs/{playerId}_{season}_{sportId}.json (skipped if it
 exists; sportId is required, without it only MLB games come back).
 
 Each game at the stint's team is rehab if its date falls inside one of his
-rehab windows at that team. The game totals must equal the stint's totals;
-if they don't (incomplete game log), the stint is left whole and logged.
+rehab windows at that team. The game totals must equal the stint's totals.
+If only G is short (older game logs omit some games, likely ones with no PA),
+the stint is still split and the missing G is shared between the parts in
+proportion to their logged games (data/processed/rehab_g_adjusted_log.csv).
+If any other stat differs, the stint is left whole and logged
+(data/processed/rehab_unsplit_log.csv).
 
 Output: data/processed/hitting_stints.parquet = hitting_season with
   is_rehab      True / False; null for a mixed stint that couldn't be split
@@ -48,7 +52,7 @@ def pull_gamelog(player_id: int, season: int, sport_id: int) -> tuple[list[dict]
 
 def split_stints(mixed: pd.DataFrame, hitting: pd.DataFrame, windows: pd.DataFrame) -> tuple[pd.DataFrame, list]:
     """Return (rows for split stints, list of stints that couldn't be split)."""
-    out, unsplit, calls = [], [], 0
+    out, unsplit, g_adjusted, calls = [], [], [], 0
     stints = mixed.merge(hitting, on=KEY, suffixes=("_r", ""))
     for i, st in enumerate(stints.itertuples(index=False), 1):
         games, fetched = pull_gamelog(st.playerId, st.season, st.sportId)
@@ -66,14 +70,31 @@ def split_stints(mixed: pd.DataFrame, hitting: pd.DataFrame, windows: pd.DataFra
         totals = rows[STATS].sum()
         expected = hitting.loc[(hitting.playerId == st.playerId) & (hitting.season == st.season)
                                & (hitting.teamId == st.teamId) & (hitting.sportId == st.sportId), STATS].iloc[0]
-        if not totals.equals(expected.astype(totals.dtype)):
-            diff = {c: (int(totals[c]), int(expected[c])) for c in STATS if totals[c] != expected[c]}
+        diff = {c: (int(totals[c]), int(expected[c])) for c in STATS if totals[c] != expected[c]}
+        if diff and list(diff) != ["G"]:
             unsplit.append((*[getattr(st, k) for k in KEY], f"game log != stint {diff}"))
             continue
-        for flag, part in rows.groupby("is_rehab"):
-            out.append({**{k: getattr(st, k) for k in KEY}, **part[STATS].sum().to_dict(),
+        parts = rows.groupby("is_rehab")[STATS].sum()
+        if diff:
+            # Only G differs (older game logs omit some games, likely ones with no PA).
+            # Those games have no dates, so share the missing G between the parts in
+            # proportion to their logged games (largest remainder).
+            missing = int(expected["G"]) - int(totals["G"])
+            logged = {flag: int(g) for flag, g in parts.G.items()}
+            share = {flag: g / sum(logged.values()) * missing for flag, g in logged.items()}
+            add = {flag: int(s) for flag, s in share.items()}
+            for flag in sorted(share, key=lambda f: share[f] - add[f], reverse=True)[:missing - sum(add.values())]:
+                add[flag] += 1
+            g_adjusted.append((*[getattr(st, k) for k in KEY], int(totals["G"]), int(expected["G"]),
+                               add.get(True, 0), add.get(False, 0)))
+            parts["G"] = [logged[flag] + add[flag] for flag in parts.index]
+        for flag, part in parts.iterrows():
+            out.append({**{k: getattr(st, k) for k in KEY}, **part.to_dict(),
                         "is_rehab": flag, "rehab_source": "transactions"})
-    print(f"  done: {len(stints)} mixed stints, {calls} API calls, {len(unsplit)} couldn't be split")
+    print(f"  done: {len(stints)} mixed stints, {calls} API calls, {len(unsplit)} couldn't be split, "
+          f"{len(g_adjusted)} split with G shared out")
+    pd.DataFrame(g_adjusted, columns=KEY + ["log_G", "stint_G", "G_added_rehab", "G_added_nonrehab"]).to_csv(
+        PROCESSED_DIR / "rehab_g_adjusted_log.csv", index=False)  # even when empty
     return pd.DataFrame(out), unsplit
 
 
