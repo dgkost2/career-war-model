@@ -6,18 +6,21 @@ Usage:
 One table per Parquet file, named after the file (hitting_season.parquet ->
 hitting_season). The database is rebuilt from scratch on every run (built in a
 temp file, then swapped in), so the Parquet files stay the source of truth and
-tables for deleted files don't linger.
+tables for deleted files don't linger. Derived tables are rebuilt first:
+  dim_player.parquet  (build_dim_player.py)
 
 Then runs integrity checks and exits non-zero if any fail:
   - every hitting_season playerId exists in people
   - every hitting_season (teamId, season) exists in teams_season
   - no duplicate stints in hitting_season (playerId, season, teamId, sportId)
   - no duplicate stints in hitting_stints (same key + is_rehab)
+  - dim_player has one row per playerId and covers every hitting_stints player
 """
 import sys
 
 import duckdb
 
+import build_dim_player
 from mlb_api import PROCESSED_DIR
 
 DB = PROCESSED_DIR / "warehouse.duckdb"
@@ -34,6 +37,11 @@ CHECKS = [
      f"SELECT count(*) FROM (SELECT {STINT} FROM hitting_season GROUP BY ALL HAVING count(*) > 1)"),
     ("duplicate stints in hitting_stints (incl. is_rehab)",
      f"SELECT count(*) FROM (SELECT {STINT}, is_rehab FROM hitting_stints GROUP BY ALL HAVING count(*) > 1)"),
+    ("duplicate playerIds in dim_player",
+     "SELECT count(*) - count(DISTINCT playerId) FROM dim_player"),
+    ("hitting_stints playerId missing from dim_player",
+     "SELECT count(*) FROM (SELECT DISTINCT playerId FROM hitting_stints) h "
+     "ANTI JOIN dim_player d ON h.playerId = d.playerId"),
 ]
 
 
@@ -63,6 +71,7 @@ def check() -> bool:
 
 
 def main() -> None:
+    build_dim_player.main()
     build()
     print("checks:")
     if not check():

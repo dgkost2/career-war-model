@@ -43,6 +43,7 @@ Two numbers per player:
 - Stints come from team fullSeason rosters with season stats hydrated (/teams/{id}/roster), not the bulk /stats endpoint: bulk collapses multi-team players into one row tagged with only the last team, and /stats with teamId drops MLB players who left mid-season. Bulk is used only to reconcile (stint PA must sum to bulk PA per player × season × level) and as a fallback for single-team players missing from every roster (source="bulk").
 - Org membership comes from a teams-by-season table (team → level, league, parentOrgId), since affiliations change year to year.
 - Transactions are used for events only (rehab assignments, signings, releases, trades, IL, promotions), not to build stat stints. MLB players' MiLB rehab stints must be flagged.
+- hitting_stints (with is_rehab) is the canonical hitting table for every downstream step; hitting_season is kept only for reconciliation. Mixed rehab stints are split into is_rehab true/false rows from game logs; is_rehab is null for the one stint whose game log doesn't match. likely_rehab stints (the 2005–2008 heuristic, rehab_source = "heuristic") are down-weighted, not dropped.
 - Hitter vs pitcher is decided per player-season from PA and batters faced, not primaryPosition. Two-way players go through both models later.
 - currentAge and currentTeam are as-of-today fields; never use them for season data. Season age comes from birthDate.
 - Rookie level (sportId 16) mixes DSL with ACL/FCL. Always keep leagueId on stats rows; DSL is treated as its own level for translations.
